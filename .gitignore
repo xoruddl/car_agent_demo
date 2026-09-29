@@ -1,5 +1,6 @@
 # 빌드 결과물
 /bin/
+/agent
 *.exe
 *.test
 *.out
