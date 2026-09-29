@@ -13,6 +13,7 @@ import (
 	// 이 모듈 안의 패키지는 go.mod의 모듈 경로를 앞에 붙여 import한다.
 	// internal/ 아래 패키지는 이 모듈 안에서만 import할 수 있다(컴파일러가 강제).
 	"github.com/xoruddl/car_agent_demo/internal/config"
+	"github.com/xoruddl/car_agent_demo/internal/state"
 )
 
 func main() {
@@ -31,12 +32,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 디스크에 저장된 상태를 복구한다. 최초 기동이면 초기 버전으로 새로 만든다.
+	// 재시작이면 죽기 직전에 하던 단계(예: DOWNLOADING)부터 이어가게 된다.
+	store := state.NewStore(cfg.DataDir)
+	st, err := store.LoadOrInit(cfg.VIN, cfg.InitialVersion)
+	if err != nil {
+		logger.Error("failed to load state", "error", err)
+		os.Exit(1)
+	}
+
 	// slog는 메시지 뒤에 "키", 값 쌍을 이어서 적는다. JSON의 필드가 된다.
 	logger.Info("vehicle agent started",
 		"vin", cfg.VIN,
 		"server_url", cfg.ServerURL,
 		"checkin_interval", cfg.CheckinInterval.String(), // "30s"처럼 읽기 쉬운 문자열로
 		"data_dir", cfg.DataDir,
-		"initial_version", cfg.InitialVersion,
+		"current_version", st.CurrentVersion,
+		"state", st.Status,
 	)
 }
