@@ -1,0 +1,13 @@
+# 빌드 결과물
+/bin/
+*.exe
+*.test
+*.out
+
+# 에이전트 로컬 상태/다운로드 파일
+/data/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
