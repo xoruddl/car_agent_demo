@@ -51,7 +51,7 @@
 | `CHECKIN_INTERVAL` | 아니요 | `30s` | 서버가 `nextCheckInSeconds`를 주지 않을 때의 기본 체크인 주기 |
 | `DATA_DIR` | 아니요 | `./data` | 상태·다운로드·설치 파일 경로. 컨테이너에서는 볼륨 `/data` |
 | `INITIAL_VERSION` | 아니요 | `1.0.0` | 최초 기동 시 현재 설치 버전 |
-| `MANIFEST_PUBLIC_KEY` | 예 | — | Ed25519 공개키. 매니페스트 서명 검증에 사용 |
+| `MANIFEST_PUBLIC_KEY` | 예 | — | Base64로 인코딩한 32바이트 Ed25519 공개키. 매니페스트 서명 검증에 사용 |
 
 `VEHICLE_ID`는 상태 파일 속 차량과 같아야 한다. 다르면 다른 차량의 볼륨을 잘못 연결한 것이므로 기동을 거부한다.
 

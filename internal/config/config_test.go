@@ -3,10 +3,17 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+// testManifestPublicKey는 길이가 올바른 Ed25519 공개키를 Base64로 표현한 값이다.
+// 실제 서명 검증을 하는 테스트가 아니므로, 값 자체의 안전성보다 형식 검증이 목적이다.
+var testManifestPublicKey = base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))
 
 // envOf는 map을 getenv 함수로 바꿔 준다.
 // Load가 os.Getenv 대신 이 함수를 쓰게 해서, 테스트가 실제 환경변수에 의존하지 않게 한다.
@@ -23,8 +30,12 @@ func envOf(m map[string]string) func(string) string {
 // 필수값만 주면 나머지는 기본값으로 채워지는지 확인한다.
 func TestLoad_Defaults(t *testing.T) {
 	cfg, err := Load(envOf(map[string]string{
-		"VIN":            "KMHEV6000000001",
-		"OTA_SERVER_URL": "http://ota-server:8080",
+		"VEHICLE_ID":          "veh-001",
+		"VEHICLE_MODEL":       "SIM-A",
+		"HW_VERSION":          "TCU-REV2",
+		"ENROLLMENT_KEY":      "enrollment-key",
+		"MANIFEST_PUBLIC_KEY": testManifestPublicKey,
+		"OTA_SERVER_URL":      "http://ota-server:8080",
 	}))
 	if err != nil {
 		// t.Fatalf는 실패를 기록하고 이 테스트를 즉시 중단한다.
@@ -33,14 +44,18 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 
 	want := Config{
-		VIN:             "KMHEV6000000001",
-		ServerURL:       "http://ota-server:8080",
-		CheckinInterval: 30 * time.Second,
-		DataDir:         "./data",
-		InitialVersion:  "1.0.0",
+		VehicleID:         "veh-001",
+		VehicleModel:      "SIM-A",
+		HWVersion:         "TCU-REV2",
+		EnrollmentKey:     "enrollment-key",
+		ServerURL:         "http://ota-server:8080",
+		CheckinInterval:   30 * time.Second,
+		DataDir:           "./data",
+		InitialVersion:    "1.0.0",
+		ManifestPublicKey: make(ed25519.PublicKey, ed25519.PublicKeySize),
 	}
-	// 필드가 모두 비교 가능한 타입이면 구조체를 == 로 통째로 비교할 수 있다.
-	if cfg != want {
+	// 공개키는 슬라이스라 == 비교를 할 수 없으므로 reflect.DeepEqual로 내부 바이트까지 비교한다.
+	if !reflect.DeepEqual(cfg, want) {
 		// t.Errorf는 실패를 기록하지만 테스트를 계속 진행한다.
 		// %+v는 구조체를 필드 이름과 함께 출력해서 어느 필드가 다른지 보기 쉽다.
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
@@ -50,24 +65,34 @@ func TestLoad_Defaults(t *testing.T) {
 // 모든 항목을 지정하면 기본값 대신 지정한 값이 쓰이는지 확인한다.
 func TestLoad_Overrides(t *testing.T) {
 	cfg, err := Load(envOf(map[string]string{
-		"VIN":              "KMHEV6000000002",
-		"OTA_SERVER_URL":   "https://ota.example.com/",
-		"CHECKIN_INTERVAL": "5s",
-		"DATA_DIR":         "/data",
-		"INITIAL_VERSION":  "2.3.4",
+		"VEHICLE_ID":          "veh-002",
+		"VEHICLE_MODEL":       "SIM-B",
+		"HW_VERSION":          "TCU-REV3",
+		"REGION":              "KR",
+		"ENROLLMENT_KEY":      "another-enrollment-key",
+		"MANIFEST_PUBLIC_KEY": testManifestPublicKey,
+		"OTA_SERVER_URL":      "https://ota.example.com/",
+		"CHECKIN_INTERVAL":    "5s",
+		"DATA_DIR":            "/data",
+		"INITIAL_VERSION":     "2.3.4",
 	}))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 
 	want := Config{
-		VIN:             "KMHEV6000000002",
-		ServerURL:       "https://ota.example.com", // 끝의 슬래시는 제거된다
-		CheckinInterval: 5 * time.Second,
-		DataDir:         "/data",
-		InitialVersion:  "2.3.4",
+		VehicleID:         "veh-002",
+		VehicleModel:      "SIM-B",
+		HWVersion:         "TCU-REV3",
+		Region:            "KR",
+		EnrollmentKey:     "another-enrollment-key",
+		ServerURL:         "https://ota.example.com", // 끝의 슬래시는 제거된다
+		CheckinInterval:   5 * time.Second,
+		DataDir:           "/data",
+		InitialVersion:    "2.3.4",
+		ManifestPublicKey: make(ed25519.PublicKey, ed25519.PublicKeySize),
 	}
-	if cfg != want {
+	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load() = %+v, want %+v", cfg, want)
 	}
 }
@@ -79,8 +104,12 @@ func TestLoad_Overrides(t *testing.T) {
 func TestLoad_Invalid(t *testing.T) {
 	// 올바른 기본 입력. 각 케이스는 여기서 항목 하나만 잘못된 값으로 바꾼다.
 	valid := map[string]string{
-		"VIN":            "KMHEV6000000001",
-		"OTA_SERVER_URL": "http://ota-server:8080",
+		"VEHICLE_ID":          "veh-001",
+		"VEHICLE_MODEL":       "SIM-A",
+		"HW_VERSION":          "TCU-REV2",
+		"ENROLLMENT_KEY":      "enrollment-key",
+		"MANIFEST_PUBLIC_KEY": testManifestPublicKey,
+		"OTA_SERVER_URL":      "http://ota-server:8080",
 	}
 
 	// 이름 없는 구조체 타입의 슬라이스. 이 테스트에서만 쓰므로 따로 타입을 선언하지 않는다.
@@ -90,7 +119,15 @@ func TestLoad_Invalid(t *testing.T) {
 		value   string // 넣을 잘못된 값
 		wantErr string // 에러 메시지에 포함되어야 할 문자열
 	}{
-		{"VIN 누락", "VIN", "", "VIN"},
+		{"차량 ID 누락", "VEHICLE_ID", "", "VEHICLE_ID"},
+		{"차량 ID 잘못된 문자", "VEHICLE_ID", "veh_001", "VEHICLE_ID"},
+		{"차량 ID 길이 초과", "VEHICLE_ID", strings.Repeat("a", 65), "VEHICLE_ID"},
+		{"차종 누락", "VEHICLE_MODEL", "", "VEHICLE_MODEL"},
+		{"HW 리비전 누락", "HW_VERSION", "", "HW_VERSION"},
+		{"등록 키 누락", "ENROLLMENT_KEY", "", "ENROLLMENT_KEY"},
+		{"공개키 누락", "MANIFEST_PUBLIC_KEY", "", "MANIFEST_PUBLIC_KEY"},
+		{"공개키 Base64 형식 오류", "MANIFEST_PUBLIC_KEY", "not-base64!", "MANIFEST_PUBLIC_KEY"},
+		{"공개키 길이 오류", "MANIFEST_PUBLIC_KEY", base64.StdEncoding.EncodeToString([]byte("short")), "MANIFEST_PUBLIC_KEY"},
 		{"서버 URL 누락", "OTA_SERVER_URL", "", "OTA_SERVER_URL"},
 		{"서버 URL 스킴 없음", "OTA_SERVER_URL", "ota-server:8080", "OTA_SERVER_URL"},
 		{"서버 URL 호스트 없음", "OTA_SERVER_URL", "http://", "OTA_SERVER_URL"},
@@ -126,12 +163,14 @@ func TestLoad_Invalid(t *testing.T) {
 
 // 잘못된 항목이 여러 개일 때 첫 번째만이 아니라 모두 한 번에 알려주는지 확인한다.
 func TestLoad_ReportsAllErrors(t *testing.T) {
-	// 빈 map: 필수값 VIN과 OTA_SERVER_URL이 둘 다 없다.
+	// 빈 map: 필수 차량 설정과 OTA_SERVER_URL이 모두 없다.
 	_, err := Load(envOf(map[string]string{}))
 	if err == nil {
 		t.Fatal("Load() error = nil, want error")
 	}
-	for _, key := range []string{"VIN", "OTA_SERVER_URL"} {
+	for _, key := range []string{
+		"VEHICLE_ID", "VEHICLE_MODEL", "HW_VERSION", "ENROLLMENT_KEY", "MANIFEST_PUBLIC_KEY", "OTA_SERVER_URL",
+	} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("Load() error = %q, want containing %q", err, key)
 		}
