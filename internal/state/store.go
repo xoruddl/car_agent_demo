@@ -70,12 +70,12 @@ func (s *Store) Load() (State, error) {
 //
 //   - 최초 기동(파일 없음): initialVersion으로 대기 상태를 만들어 저장한다.
 //   - 재시작(파일 있음): 저장된 상태를 그대로 반환한다. initialVersion은 무시한다.
-//   - 파일의 VIN이 vin과 다르면 에러를 반환한다. 다른 차량의 볼륨을 잘못 붙인 경우다.
-func (s *Store) LoadOrInit(vin, initialVersion string) (State, error) {
+//   - 파일의 vehicle_id가 실행 중인 vehicleID와 다르면 에러를 반환한다. 다른 차량의 볼륨을 잘못 붙인 경우다.
+func (s *Store) LoadOrInit(vehicleID, initialVersion string) (State, error) {
 	st, err := s.Load()
 	switch {
 	case errors.Is(err, ErrNotFound):
-		st = New(vin, initialVersion)
+		st = New(vehicleID, initialVersion)
 		if err := s.Save(st); err != nil {
 			return State{}, fmt.Errorf("save initial state: %w", err)
 		}
@@ -84,8 +84,8 @@ func (s *Store) LoadOrInit(vin, initialVersion string) (State, error) {
 		return State{}, err
 	}
 
-	if st.VIN != vin {
-		return State{}, fmt.Errorf("state file belongs to VIN %q, but this agent is %q", st.VIN, vin)
+	if st.VehicleID != vehicleID {
+		return State{}, fmt.Errorf("state file belongs to vehicle ID %q, but this agent is %q", st.VehicleID, vehicleID)
 	}
 	return st, nil
 }
