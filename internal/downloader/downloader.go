@@ -26,6 +26,16 @@ import (
 // downloader가 state 패키지의 실패 코드를 직접 알 필요가 없도록 에러 값으로만 구분해 준다.
 var ErrHashMismatch = errors.New("sha256 mismatch")
 
+// ErrSizeMismatch는 받은 파일 크기가 매니페스트의 fileSize와 다를 때 반환한다.
+var ErrSizeMismatch = errors.New("file size mismatch")
+
+// ErrURLRejected는 CDN이 서명 URL을 거절했을 때(403 서명 불일치, 410 만료) 반환한다.
+//
+// 펌웨어 문제가 아니라 URL이 낡았다는 뜻이므로 업데이트 실패로 기록하면 안 된다.
+// 에이전트는 errors.Is로 이 에러를 골라내 매니페스트를 다시 요청해 새 URL을 받는다.
+// (예: 차량이 꺼져 있다 다음 날 켜지면 저장해 둔 URL은 이미 만료돼 있다.)
+var ErrURLRejected = errors.New("download url rejected")
+
 // Downloader는 HTTP GET으로 펌웨어를 받아 파일로 저장한다.
 type Downloader struct {
 	http *http.Client // 실제 HTTP 요청을 보내는 표준 라이브러리 클라이언트
@@ -46,12 +56,13 @@ func New(timeout time.Duration) *Downloader {
 //
 //   - dest의 상위 디렉터리가 없으면 만든다.
 //   - dest에 이전 실행의 부분 파일이 있으면 처음부터 다시 받아 덮어쓴다(이어받기는 범위 밖).
-//   - 실패하면(네트워크 오류, 200이 아닌 응답, 해시 불일치, ctx 취소) dest를 지운다.
+//   - CDN이 URL을 거절하면(403, 410) ErrURLRejected를 감싼 에러를 돌려준다.
+//   - 실패하면(네트워크 오류, 200이 아닌 응답, 크기·해시 불일치, ctx 취소) dest를 지운다.
 //     검증되지 않은 파일이 남아 설치 단계로 넘어가는 일을 막기 위해서다.
 //
 // 반환값에 이름(err)을 붙인 "named return"을 쓴다. 이렇게 하면 아래 defer 안에서
 // 함수가 최종적으로 돌려줄 에러를 보고 성공·실패에 따라 정리 작업을 다르게 할 수 있다.
-func (d *Downloader) Download(ctx context.Context, url, dest, wantSHA256 string) (err error) {
+func (d *Downloader) Download(ctx context.Context, url, dest string, wantSize int64, wantSHA256 string) (err error) {
 	// 0o755: 소유자는 읽기·쓰기·실행, 나머지는 읽기·실행 권한. 0o는 8진수 표기다.
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("create download dir: %w", err)
@@ -80,8 +91,15 @@ func (d *Downloader) Download(ctx context.Context, url, dest, wantSHA256 string)
 	}
 	defer resp.Body.Close()
 
-	// docs/api.md: 200이 아니면 DOWNLOAD_FAILED. 206 같은 다른 2xx도 기대하지 않으므로 200만 허용한다.
-	if resp.StatusCode != http.StatusOK {
+	// docs/api.md 4장: 403·410은 매니페스트 재요청 대상이고, 그 밖의 200이 아닌 응답은 DOWNLOAD_FAILED.
+	// 206 같은 다른 2xx도 기대하지 않으므로 200만 성공으로 본다.
+	// switch는 위에서부터 처음 맞는 case 하나만 실행한다(다른 언어와 달리 break가 필요 없다).
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// 정상 응답. 아래에서 본문을 받는다.
+	case http.StatusForbidden, http.StatusGone:
+		return fmt.Errorf("%w: status %d", ErrURLRejected, resp.StatusCode)
+	default:
 		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
@@ -101,7 +119,8 @@ func (d *Downloader) Download(ctx context.Context, url, dest, wantSHA256 string)
 	// 2. 해시 계산: 같은 데이터를 hasher에도 넣어서 SHA256을 누적 계산
 	// 3. 실패 처리: 도중에 문제가 생기면(연결 끊김, 취소, 타임아웃, 디스크 가득 참) 파일을 닫고 에러를 반환합니다. 받다 만 파일은 앞서 등록한 defer가 삭제
 	hasher := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, hasher), resp.Body); err != nil {
+	size, err := io.Copy(io.MultiWriter(f, hasher), resp.Body)
+	if err != nil {
 		f.Close()
 		return fmt.Errorf("download body: %w", err)
 	}
@@ -116,6 +135,9 @@ func (d *Downloader) Download(ctx context.Context, url, dest, wantSHA256 string)
 	// 쓰기용 파일은 Close에서도 에러가 날 수 있으므로(디스크 가득 참 등) 확인한다.
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close file: %w", err)
+	}
+	if size != wantSize {
+		return fmt.Errorf("%w: got %d, want %d", ErrSizeMismatch, size, wantSize)
 	}
 
 	// Sum(nil)은 지금까지 넣은 데이터의 해시를 []byte로 돌려준다. 매니페스트와 같은 소문자 hex로 바꿔 비교한다.
