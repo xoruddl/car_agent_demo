@@ -8,26 +8,16 @@ import (
 	"testing"
 )
 
-// testPending은 여러 테스트에서 쓰는 진행 중 업데이트 예시를 만든다.
-func testPending() *PendingUpdate {
-	return &PendingUpdate{
-		CampaignID:    "cmp-42",
-		TargetVersion: "1.1.0",
-		URL:           "http://cdn/fw/1.1.0.bin",
-		SHA256:        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-	}
-}
-
-// 저장한 상태를 다시 읽으면 똑같은 값이 나와야 한다(왕복 테스트).
+// 저장한 상태를 다시 읽으면 매니페스트와 결과를 포함해 같은 값이 나와야 한다.
 func TestStore_SaveAndLoad(t *testing.T) {
 	// t.TempDir()은 테스트 전용 임시 디렉터리를 만들고, 테스트가 끝나면 자동으로 지운다.
 	store := NewStore(t.TempDir())
 
 	saved := State{
-		VIN:            "V1",
-		CurrentVersion: "1.0.0",
-		Status:         Downloading,
-		PendingUpdate:  testPending(),
+		VehicleID:      "veh-001",
+		CurrentVersion: "1.1.0",
+		Status:         Idle,
+		LastUpdate:     validSuccess(),
 	}
 	if err := store.Save(saved); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -38,14 +28,42 @@ func TestStore_SaveAndLoad(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	// PendingUpdate는 포인터라서 ==로 비교하면 주소가 달라 항상 다르다고 나온다.
-	// 그래서 포인터가 가리키는 값(*)끼리 따로 비교한다.
-	if loaded.VIN != saved.VIN || loaded.CurrentVersion != saved.CurrentVersion ||
-		loaded.Status != saved.Status || loaded.ErrorCode != saved.ErrorCode {
+	if loaded.VehicleID != saved.VehicleID || loaded.CurrentVersion != saved.CurrentVersion || loaded.Status != saved.Status {
 		t.Errorf("Load() = %+v, want %+v", loaded, saved)
 	}
-	if loaded.PendingUpdate == nil || *loaded.PendingUpdate != *saved.PendingUpdate {
-		t.Errorf("Load().PendingUpdate = %+v, want %+v", loaded.PendingUpdate, saved.PendingUpdate)
+	if loaded.PendingUpdate != nil {
+		t.Errorf("Load().PendingUpdate = %+v, want nil", loaded.PendingUpdate)
+	}
+	if loaded.LastUpdate == nil || loaded.LastUpdate.CampaignID != saved.LastUpdate.CampaignID ||
+		loaded.LastUpdate.Result != saved.LastUpdate.Result || !loaded.LastUpdate.FinishedAt.Equal(*saved.LastUpdate.FinishedAt) {
+		t.Errorf("Load().LastUpdate = %+v, want %+v", loaded.LastUpdate, saved.LastUpdate)
+	}
+}
+
+// 다운로드 중 재기동해도 매니페스트의 검증·다운로드 정보가 모두 남아야 한다.
+func TestStore_SaveAndLoadPendingUpdate(t *testing.T) {
+	store := NewStore(t.TempDir())
+	saved := State{
+		VehicleID:      "veh-001",
+		CurrentVersion: "1.0.0",
+		Status:         Downloading,
+		PendingUpdate:  validPending(),
+	}
+	if err := store.Save(saved); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.PendingUpdate == nil {
+		t.Fatal("Load().PendingUpdate = nil, want manifest")
+	}
+	if got, want := loaded.PendingUpdate, saved.PendingUpdate; got.CampaignID != want.CampaignID ||
+		got.TargetVersion != want.TargetVersion || got.FileSize != want.FileSize || got.SHA256 != want.SHA256 ||
+		got.Signature != want.Signature || got.DownloadURL != want.DownloadURL || !got.URLExpiresAt.Equal(want.URLExpiresAt) {
+		t.Errorf("Load().PendingUpdate = %+v, want %+v", got, want)
 	}
 }
 
@@ -55,7 +73,7 @@ func TestStore_FileFormat(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
 
-	if err := store.Save(New("V1", "1.0.0")); err != nil {
+	if err := store.Save(New("veh-001", "1.0.0")); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
@@ -64,11 +82,11 @@ func TestStore_FileFormat(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 	for _, want := range []string{
-		`"vin": "V1"`,
+		`"vehicle_id": "veh-001"`,
 		`"current_version": "1.0.0"`,
 		`"state": "IDLE"`,
 		`"pending_update": null`,
-		`"error_code": ""`,
+		`"last_update": null`,
 	} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("state.json에 %s 가 없음:\n%s", want, raw)
@@ -81,7 +99,7 @@ func TestStore_SaveLeavesNoTempFile(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
 
-	if err := store.Save(New("V1", "1.0.0")); err != nil {
+	if err := store.Save(New("veh-001", "1.0.0")); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
@@ -96,7 +114,7 @@ func TestStore_SaveRejectsInvalidState(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
 
-	invalid := State{VIN: "V1", CurrentVersion: "1.0.0", Status: Downloading} // PendingUpdate 없음
+	invalid := State{VehicleID: "veh-001", CurrentVersion: "1.0.0", Status: Downloading} // PendingUpdate 없음
 	if err := store.Save(invalid); err == nil {
 		t.Fatal("Save() error = nil, want error")
 	}
@@ -135,11 +153,11 @@ func TestStore_LoadCorrupted(t *testing.T) {
 func TestStore_LoadOrInit_FirstBoot(t *testing.T) {
 	store := NewStore(t.TempDir())
 
-	st, err := store.LoadOrInit("V1", "1.0.0")
+	st, err := store.LoadOrInit("veh-001", "1.0.0")
 	if err != nil {
 		t.Fatalf("LoadOrInit() error = %v", err)
 	}
-	if want := New("V1", "1.0.0"); st != want {
+	if want := New("veh-001", "1.0.0"); st != want {
 		t.Errorf("LoadOrInit() = %+v, want %+v", st, want)
 	}
 
@@ -149,37 +167,37 @@ func TestStore_LoadOrInit_FirstBoot(t *testing.T) {
 	}
 }
 
-// 재시작: 파일이 있으면 초기 버전을 무시하고 저장된 상태를 그대로 이어가야 한다.
+// 재시작: 파일이 있으면 초기 버전을 무시하고 저장된 상태와 다음 체크인 결과를 이어가야 한다.
 func TestStore_LoadOrInit_Restart(t *testing.T) {
 	store := NewStore(t.TempDir())
 
-	// 1.1.0으로 업데이트하고 결과 보고 중에 죽은 상황을 흉내 낸다.
-	before := State{VIN: "V1", CurrentVersion: "1.1.0", Status: Reporting, PendingUpdate: testPending()}
+	// 1.1.0 설치를 끝내고, 결과를 아직 체크인으로 보내지 못한 상황을 흉내 낸다.
+	before := State{VehicleID: "veh-001", CurrentVersion: "1.1.0", Status: Idle, LastUpdate: validSuccess()}
 	if err := store.Save(before); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	st, err := store.LoadOrInit("V1", "1.0.0")
+	st, err := store.LoadOrInit("veh-001", "1.0.0")
 	if err != nil {
 		t.Fatalf("LoadOrInit() error = %v", err)
 	}
-	if st.CurrentVersion != "1.1.0" || st.Status != Reporting {
-		t.Errorf("LoadOrInit() = %+v, 저장된 상태(1.1.0, REPORTING)를 이어가야 함", st)
+	if st.CurrentVersion != "1.1.0" || st.LastUpdate == nil || st.LastUpdate.Result != ResultSucceeded {
+		t.Errorf("LoadOrInit() = %+v, 저장된 버전과 last_update를 이어가야 함", st)
 	}
 }
 
-// 다른 차량의 상태 파일(볼륨)을 잘못 붙이면 기동을 거부해야 한다.그럼
-func TestStore_LoadOrInit_VINMismatch(t *testing.T) {
+// 다른 차량의 상태 파일(볼륨)을 잘못 붙이면 기동을 거부해야 한다.
+func TestStore_LoadOrInit_VehicleIDMismatch(t *testing.T) {
 	store := NewStore(t.TempDir())
-	if err := store.Save(New("OTHER-VIN", "1.0.0")); err != nil {
+	if err := store.Save(New("veh-other", "1.0.0")); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	_, err := store.LoadOrInit("V1", "1.0.0")
+	_, err := store.LoadOrInit("veh-001", "1.0.0")
 	if err == nil {
-		t.Fatal("LoadOrInit() error = nil, want VIN 불일치 에러")
+		t.Fatal("LoadOrInit() error = nil, want vehicle ID 불일치 에러")
 	}
-	if !strings.Contains(err.Error(), "OTHER-VIN") {
-		t.Errorf("에러 메시지에 저장된 VIN이 없음: %v", err)
+	if !strings.Contains(err.Error(), "veh-other") {
+		t.Errorf("에러 메시지에 저장된 vehicle ID가 없음: %v", err)
 	}
 }

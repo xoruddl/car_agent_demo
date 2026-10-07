@@ -47,7 +47,7 @@ func TestDownload_Success(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "downloads", "cmp-42.bin")
 
 	d := New(5 * time.Second)
-	if err := d.Download(context.Background(), srv.URL+"/fw/1.1.0.bin", dest, sha256Hex(firmware)); err != nil {
+	if err := d.Download(context.Background(), srv.URL+"/fw/1.1.0.bin", dest, int64(len(firmware)), sha256Hex(firmware)); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 
@@ -79,7 +79,7 @@ func TestDownload_OverwritesPartialFile(t *testing.T) {
 	d := New(5 * time.Second)
 	// 가짜 CDN 에서 파일을 받아 dest 에 저장
 	// sha256Hex(firmware): 기대 해시
-	if err := d.Download(context.Background(), srv.URL, dest, sha256Hex(firmware)); err != nil {
+	if err := d.Download(context.Background(), srv.URL, dest, int64(len(firmware)), sha256Hex(firmware)); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 
@@ -96,11 +96,13 @@ func TestDownload_OverwritesPartialFile(t *testing.T) {
 // 받은 내용의 해시가 매니페스트와 다르면 ErrHashMismatch를 돌려주고 파일을 지운다.
 // 에이전트는 errors.Is로 이 에러를 구분해 HASH_MISMATCH 코드를 기록한다.
 func TestDownload_HashMismatch(t *testing.T) {
-	srv := newCDN(t, http.StatusOK, []byte("tampered firmware"))
+	tampered := append([]byte(nil), firmware...)
+	tampered[0] ^= 0xff // 크기는 유지하고 내용만 바꿔 해시 불일치를 만든다.
+	srv := newCDN(t, http.StatusOK, tampered)
 	dest := filepath.Join(t.TempDir(), "cmp-42.bin")
 
 	d := New(5 * time.Second)
-	err := d.Download(context.Background(), srv.URL, dest, sha256Hex(firmware))
+	err := d.Download(context.Background(), srv.URL, dest, int64(len(firmware)), sha256Hex(firmware))
 	if !errors.Is(err, ErrHashMismatch) {
 		t.Fatalf("err = %v, want ErrHashMismatch", err)
 	}
@@ -139,12 +141,41 @@ func TestDownload_Failures(t *testing.T) {
 			dest := filepath.Join(t.TempDir(), "cmp-42.bin")
 
 			d := New(5 * time.Second)
-			err := d.Download(context.Background(), tt.url(t), dest, sha256Hex(firmware))
+			err := d.Download(context.Background(), tt.url(t), dest, int64(len(firmware)), sha256Hex(firmware))
 			if err == nil {
 				t.Fatal("err = nil, want error")
 			}
 			if errors.Is(err, ErrHashMismatch) {
 				t.Errorf("err = %v, must not be ErrHashMismatch", err)
+			}
+			// 404 등은 URL을 새로 받아도 해결되지 않으므로 재요청 대상(ErrURLRejected)이 아니다.
+			if errors.Is(err, ErrURLRejected) {
+				t.Errorf("err = %v, must not be ErrURLRejected", err)
+			}
+			assertNotExist(t, dest)
+		})
+	}
+}
+
+// CDN이 서명 URL을 거절하면(403 서명 불일치, 410 만료) ErrURLRejected를 돌려준다.
+// 에이전트는 이 경우 실패로 기록하지 않고 매니페스트를 다시 받아 새 URL로 재시도한다.
+func TestDownload_URLRejected(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+	}{
+		{name: "403 signature mismatch", status: http.StatusForbidden},
+		{name: "410 url expired", status: http.StatusGone},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newCDN(t, tt.status, nil)
+			dest := filepath.Join(t.TempDir(), "cmp-42.bin")
+
+			err := New(5*time.Second).Download(context.Background(), srv.URL, dest, int64(len(firmware)), sha256Hex(firmware))
+			if !errors.Is(err, ErrURLRejected) {
+				t.Fatalf("err = %v, want ErrURLRejected", err)
 			}
 			assertNotExist(t, dest)
 		})
@@ -161,11 +192,22 @@ func TestDownload_ContextCanceled(t *testing.T) {
 	cancel() // 시작하기 전에 미리 취소해 둔다
 
 	d := New(5 * time.Second)
-	err := d.Download(ctx, srv.URL, dest, sha256Hex(firmware))
+	err := d.Download(ctx, srv.URL, dest, int64(len(firmware)), sha256Hex(firmware))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	assertNotExist(t, dest)
+}
+
+// 바이트 수가 매니페스트와 다르면 파일을 지우고 ErrSizeMismatch를 돌려줘야 한다.
+func TestDownload_SizeMismatch(t *testing.T) {
+	srv := newCDN(t, http.StatusOK, firmware)
+	dest := filepath.Join(t.TempDir(), "cmp-42.bin")
+	err := New(5*time.Second).Download(context.Background(), srv.URL, dest, int64(len(firmware)+1), sha256Hex(firmware))
+	if !errors.Is(err, ErrSizeMismatch) {
+		t.Fatalf("err = %v, want ErrSizeMismatch", err)
+	}
+	assertNotExist(t, dest) // dest 파일이 지워졌는지 확인
 }
 
 // assertNotExist는 path에 파일이 없는지 확인한다.
